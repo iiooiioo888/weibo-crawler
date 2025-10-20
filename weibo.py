@@ -37,8 +37,45 @@ warnings.filterwarnings("ignore")
 # 如果日志文件夹不存在，则创建
 if not os.path.isdir("log/"):
     os.makedirs("log/")
-logging_path = os.path.split(os.path.realpath(__file__))[0] + os.sep + "logging.conf"
-logging.config.fileConfig(logging_path)
+
+# 从config读取logging设置
+def setup_logging(config):
+    logging_config = config.get("logging", {})
+    level = getattr(logging, logging_config.get("level", "INFO").upper())
+    console = logging_config.get("console", True)
+    file = logging_config.get("file", True)
+    file_path = logging_config.get("file_path", "log/crawler.log")
+
+    # 设置root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(level)
+
+    # 清空现有handlers
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+
+    # 添加handlers
+    if console:
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setLevel(level)
+        console_formatter = logging.Formatter('%(message)s')
+        console_handler.setFormatter(console_formatter)
+        root_logger.addHandler(console_handler)
+
+    if file:
+        if not os.path.exists(file_path):
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        file_handler = logging.FileHandler(file_path, encoding='utf-8')
+        file_handler.setLevel(level)
+        file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+        file_handler.setFormatter(file_formatter)
+        root_logger.addHandler(file_handler)
+
+    # 设置weibo logger
+    weibo_logger = logging.getLogger("weibo")
+    weibo_logger.setLevel(level)
+    weibo_logger.propagate = 0  # 不传播到root logger，避免重复
+
 logger = logging.getLogger("weibo")
 
 # 日期时间格式
@@ -97,12 +134,13 @@ class Weibo(object):
         self.user_id_as_folder_name = config.get(
             "user_id_as_folder_name", 0
         )  # 结果目录名，取值为0或1，决定结果文件存储在用户昵称文件夹里还是用户id文件夹里
-        cookie_string = config.get("cookie")  # 微博cookie，可填可不填
+        cookie_string = config.get("cookie", "")  # 微博cookie，可填可不填
         cookies = {}
-        for pair in cookie_string.split(';'):
-            if '=' in pair:
-                key, value = pair.split('=', 1)
-                cookies[key.strip()] = value.strip()
+        if isinstance(cookie_string, str) and cookie_string.strip():
+            for pair in cookie_string.split(';'):
+                if '=' in pair.strip():
+                    key, value = pair.split('=', 1)
+                    cookies[key.strip()] = value.strip()
         self.headers = {
             'Referer': 'https://weibo.com/',
             'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
@@ -2341,6 +2379,7 @@ def get_config():
 def main():
     try:
         config = get_config()
+        setup_logging(config)
         wb = Weibo(config)
         wb.start()  # 爬取微博信息
         if const.NOTIFY["NOTIFY"]:

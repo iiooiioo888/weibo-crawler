@@ -5,7 +5,8 @@
     "start_page": 1,
     "page_weibo_count": 10,
     "write_mode": [
-        "csv"
+        "csv",
+        "sqlite"
     ],
     "original_pic_download": 1,
     "retweet_pic_download": 0,
@@ -13,9 +14,9 @@
     "retweet_video_download": 0,
     "original_live_photo_download": 1,
     "retweet_live_photo_download": 0,
-    "download_comment": 1,
+    "download_comment": 0,
     "comment_max_download_count": 100,
-    "download_repost": 1,
+    "download_repost": 0,
     "repost_max_download_count": 100,
     "user_id_as_folder_name": 0,
     "remove_html_tag": 1,
@@ -32,5 +33,11 @@
     "post_config": {
         "api_url": "https://api.example.com",
         "api_token": ""
+    },
+    "logging": {
+        "level": "INFO",
+        "console": true,
+        "file": true,
+        "file_path": "log/crawler.log"
     }
 }

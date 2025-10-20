@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "weibo-crawler"
+version = "1.0.0"
+description = "A crawler for Weibo (Sina Weibo) data"
+authors = [
+    {name = "dataabc", email = "author@example.com"},
+]
+dependencies = [
+    "lxml==5.3.0",
+    "pymongo==4.6.3",
+    "PyMySQL==1.1.1",
+    "requests>=2.31.0",
+    "schedule==1.2.1",
+    "tqdm==4.66.3",
+]
+requires-python = ">=3.8"
+readme = "README.md"
+license = {text = "MIT"}
+
+[project.scripts]
+weibo-crawler = "weibo:main"
+
+[tool.setuptools]
+packages = ["util"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py38"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "C90"]
+ignore = ["E501"]  # line too long
+
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true
