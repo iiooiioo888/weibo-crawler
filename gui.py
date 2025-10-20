@@ -15,9 +15,24 @@ import logging
 import threading
 import queue
 import time
+from datetime import datetime
 
 from weibo import Weibo, setup_logging, get_config
 from session_manager import SessionManager, ScheduleManager
+from statistics_manager import StatisticsManager
+
+# 圖表支持
+try:
+    import matplotlib
+    matplotlib.use('TkAgg')
+    import matplotlib.pyplot as plt
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+    from matplotlib.figure import Figure
+    import matplotlib.dates as mdates
+    MATPLOTLIB_AVAILABLE = True
+except ImportError:
+    MATPLOTLIB_AVAILABLE = False
+    logging.warning("matplotlib未安裝，圖表功能將被禁用")
 
 class WeiboCrawlerGUI:
     def __init__(self, root):
@@ -51,9 +66,10 @@ class WeiboCrawlerGUI:
         self.stats_var = tk.StringVar(value="等待開始...")
         self.is_running = False
 
-        # 初始化會話和排程管理器
+        # 初始化管理器
         self.session_manager = SessionManager()
         self.schedule_manager = ScheduleManager(self.session_manager)
+        self.stats_manager = StatisticsManager()
 
         # 設定字體和樣式
         self.setup_styles()
@@ -144,6 +160,9 @@ class WeiboCrawlerGUI:
 
         # 排程管理頁面
         self.create_schedule_tab()
+
+        # 統計儀表板
+        self.create_statistics_tab()
 
         # 日誌頁面
         self.create_log_tab()
@@ -317,33 +336,44 @@ class WeiboCrawlerGUI:
 
     def test_connection(self):
         """測試連線"""
-        self.log_message("開始測試連線...")
+        self.log_message("Testing connection...")
 
         # 確保配置正確
-        if not self.config_vars["user_id_list"].get() or self.config_vars["user_id_list"].get() == "列表模式":
-            self.log_message("錯誤: 未指定用戶ID列表文件")
+        user_list_file = self.config_vars["user_id_list"].get()
+        if not user_list_file or user_list_file == "列表模式":
+            self.log_message("Error: No user ID list file specified")
+            messagebox.showwarning("Warning", "Please specify a user ID list file first")
             return
 
         try:
             config = get_config()
+
+            # 使用當前UI配置而不是檔案中的配置
+            ui_config = self.build_config_from_ui()
+            config.update(ui_config)
+
             wb = Weibo(config)
             wb._Weibo__validate_config(config)  # 測試配置驗證
 
             # 嘗試獲取第一個用戶資訊
-            wb.user_config_list = wb.get_user_config_list(self.config_vars["user_id_list"].get())
+            wb.user_config_list = wb.get_user_config_list(user_list_file)
             if wb.user_config_list:
                 wb.user_config = wb.user_config_list[0]
                 wb.initialize_info(wb.user_config)
                 if wb.get_user_info() == 0:
-                    self.log_message("連線測試成功！")
+                    self.log_message("Connection test successful!")
                     wb.print_user_info()
+                    messagebox.showinfo("Success", "Connection test passed!")
                 else:
-                    self.log_message("連線測試失敗: 無法獲取用戶資訊")
+                    self.log_message("Connection test failed: Unable to get user info")
+                    messagebox.showwarning("Warning", "Connection test failed: Unable to get user info")
             else:
-                self.log_message("連線測試失敗: 用戶列表為空")
+                self.log_message("Connection test failed: User list is empty")
+                messagebox.showwarning("Warning", "Connection test failed: User list is empty")
 
         except Exception as e:
-            self.log_message(f"連線測試失敗: {e}")
+            self.log_message(f"Connection test failed: {e}")
+            messagebox.showerror("Error", f"Connection test failed: {e}")
 
     def start_crawling(self):
         """開始爬取"""
@@ -527,36 +557,28 @@ class WeiboCrawlerGUI:
 
     def add_schedule(self):
         """新增排程"""
-        from tkinter import simpledialog
-
-        user_id = simpledialog.askstring("新增排程", "請輸入用戶ID:")
+        # 選擇用戶
+        user_id, user_name = self.select_user_from_list()
         if not user_id:
             return
 
         # 選擇時間類型
-        time_types = ["daily", "weekly", "monthly"]
-        schedule_type = self.select_time_type()
+        schedule_type = self.select_schedule_type()
         if not schedule_type:
             return
 
         # 輸入時間
-        if schedule_type == "daily":
-            time_str = simpledialog.askstring("時間設定", "請輸入每日執行時間 (HH:MM):", initialvalue="09:00")
-        elif schedule_type == "weekly":
-            time_str = simpledialog.askstring("時間設定", "請輸入每週執行時間 (HH:MM):", initialvalue="09:00")
-        elif schedule_type == "monthly":
-            time_str = simpledialog.askstring("時間設定", "請輸入每月執行時間 (HH:MM):", initialvalue="09:00")
-
+        time_str = self.select_schedule_time(schedule_type)
         if not time_str:
             return
 
         # 添加排程
         config = self.build_config_from_ui()
         if self.schedule_manager.add_schedule(user_id, time_str, schedule_type, config):
-            self.log_message(f"排程已新增: {user_id} - {schedule_type} {time_str}")
+            self.log_message(f"Schedule added: {user_name}({user_id}) - {schedule_type} {time_str}")
             self.refresh_schedules()
         else:
-            messagebox.showerror("錯誤", "新增排程失敗，請檢查參數")
+            messagebox.showerror("Error", "Failed to add schedule, please check parameters")
 
     def select_time_type(self):
         """選擇時間類型"""
@@ -621,6 +643,410 @@ class WeiboCrawlerGUI:
             ))
 
         self.log_message(f"已載入 {len(schedules)} 個排程任務")
+
+    def create_statistics_tab(self):
+        """創建統計儀表板頁面"""
+        stats_frame = ttk.Frame(self.notebook)
+        self.notebook.add(stats_frame, text="Statistics Dashboard")
+
+        # 統計總覽區域
+        summary_frame = ttk.LabelFrame(stats_frame, text="Statistics Overview", padding=10)
+        summary_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        # 總結統計顯示
+        self.summary_labels = {}
+        summary_stats = [
+            ("Total Sessions", "total_sessions"),
+            ("Total Weibo Posts", "total_weibos"),
+            ("Total Images", "total_images"),
+            ("Total Videos", "total_videos"),
+            ("Avg Efficiency", "avg_efficiency"),
+            ("Unique Users", "unique_users")
+        ]
+
+        for i, (label_text, key) in enumerate(summary_stats):
+            row = i // 3
+            col = (i % 3) * 2
+            ttk.Label(summary_frame, text=f"{label_text}:").grid(row=row, column=col, sticky="e", padx=5, pady=2)
+            self.summary_labels[key] = ttk.Label(summary_frame, text="0", font=("Microsoft YaHei", 10, "bold"))
+            self.summary_labels[key].grid(row=row, column=col+1, sticky="w", padx=5, pady=2)
+
+        # 圖表區域
+        chart_frame = ttk.LabelFrame(stats_frame, text="Data Charts", padding=10)
+        chart_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        # 圖表控制按鈕
+        chart_controls = ttk.Frame(chart_frame)
+        chart_controls.pack(fill=tk.X, pady=(0, 10))
+
+        self.chart_type_var = tk.StringVar(value="daily_trend")
+        chart_types = [
+            ("Daily Trend", "daily_trend"),
+            ("User Stats", "user_stats"),
+            ("Performance", "performance")
+        ]
+
+        for text, value in chart_types:
+            ttk.Radiobutton(chart_controls, text=text, variable=self.chart_type_var,
+                          value=value, command=self.update_chart).pack(side=tk.LEFT, padx=10)
+
+        # 圖表顯示區域
+        if MATPLOTLIB_AVAILABLE:
+            self.figure = Figure(figsize=(8, 5), dpi=100, facecolor='#F8F9FA')
+            self.canvas_frame = ttk.Frame(chart_frame)
+            self.canvas_frame.pack(fill=tk.BOTH, expand=True)
+            self.canvas = FigureCanvasTkAgg(self.figure, master=self.canvas_frame)
+            self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+            # 創建初始圖表
+            self.update_chart()
+        else:
+            ttk.Label(chart_frame, text="圖表功能未啟用：matplotlib 未安裝",
+                     foreground="red").pack(expand=True)
+
+        # 最新會話顯示
+        sessions_frame = ttk.LabelFrame(stats_frame, text="Recent Sessions", padding=10)
+        sessions_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        # 創建會話表格
+        columns = ("Start Time", "User", "Status", "Weibos", "Images", "Efficiency")
+        self.sessions_tree = ttk.Treeview(sessions_frame, columns=columns, show="headings", height=6)
+
+        # 設定欄位標題
+        column_widths = [140, 100, 80, 80, 80, 80]
+        for col, width in zip(columns, column_widths):
+            self.sessions_tree.heading(col, text=col)
+            self.sessions_tree.column(col, width=width, anchor="center")
+
+        # 添加滾動條
+        v_scrollbar = ttk.Scrollbar(sessions_frame, orient="vertical", command=self.sessions_tree.yview)
+        self.sessions_tree.configure(yscrollcommand=v_scrollbar.set)
+
+        self.sessions_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        v_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # 統計操作按鈕
+        stats_btn_frame = ttk.Frame(stats_frame)
+        stats_btn_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        ttk.Button(stats_btn_frame, text="Refresh Stats", command=self.refresh_statistics).pack(side=tk.LEFT, padx=5)
+        ttk.Button(stats_btn_frame, text="Clean Old Data", command=self.cleanup_old_data).pack(side=tk.RIGHT, padx=5)
+
+        # 載入初始統計數據
+        self.refresh_statistics()
+
+    def update_chart(self):
+        """更新圖表顯示"""
+        if not MATPLOTLIB_AVAILABLE:
+            return
+
+        chart_type = self.chart_type_var.get()
+        self.figure.clear()
+
+        try:
+            if chart_type == "daily_trend":
+                self._create_daily_trend_chart()
+            elif chart_type == "user_stats":
+                self._create_user_stats_chart()
+            elif chart_type == "performance":
+                self._create_performance_chart()
+
+            self.canvas.draw()
+        except Exception as e:
+            self.log_message(f"圖表更新失敗: {e}")
+
+    def _create_daily_trend_chart(self):
+        """創建每日趨勢圖表"""
+        data = self.stats_manager.get_daily_chart_data()
+
+        if not data:
+            ax = self.figure.add_subplot(111)
+            ax.text(0.5, 0.5, "無數據可顯示", transform=ax.transAxes, ha="center", va="center",
+                   fontsize=14, color="gray")
+            ax.set_title("每日爬取趨勢", fontsize=12, fontweight='bold')
+            return
+
+        ax1 = self.figure.add_subplot(111)
+
+        # 提取數據
+        dates = [row[0] for row in data]
+        weibo_counts = [row[2] for row in data]
+        efficiency = [row[5] for row in data]
+
+        # 繪製雙軸圖
+        bars = ax1.bar(dates, weibo_counts, alpha=0.7, color='#4A90E2', label='微博數')
+        ax1.set_ylabel('微博數', color='#4A90E2')
+        ax1.tick_params(axis='y', labelcolor='#4A90E2')
+
+        ax2 = ax1.twinx()
+        line = ax2.plot(dates, efficiency, 'r-', linewidth=2, marker='o', label='效率')
+        ax2.set_ylabel('效率 (微博/分鐘)', color='red')
+        ax2.tick_params(axis='y', labelcolor='red')
+
+        # 設置標題和格式
+        ax1.set_title("每日爬取統計", fontsize=12, fontweight='bold')
+        ax1.set_xlabel("日期")
+
+        # 旋轉x軸標籤
+        plt.setp(ax1.get_xticklabels(), rotation=45, ha='right')
+
+        # 添加圖例
+        lines1, labels1 = ax1.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
+
+    def _create_user_stats_chart(self):
+        """創建用戶統計圖表"""
+        data = self.stats_manager.get_user_chart_data()
+
+        if not data:
+            ax = self.figure.add_subplot(111)
+            ax.text(0.5, 0.5, "無數據可顯示", transform=ax.transAxes, ha="center", va="center",
+                   fontsize=14, color="gray")
+            ax.set_title("用戶統計", fontsize=12, fontweight='bold')
+            return
+
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(8, 4))
+
+        # 提取前10個用戶的數據
+        users = [row[0][:8] + "..." if len(row[0]) > 8 else row[0] for row in data[:10]]
+        weibo_counts = [row[1] for row in data[:10]]
+        success_rates = [row[3] * 100 for row in data[:10]]
+
+        # 微博數量柱狀圖
+        bars = ax1.bar(range(len(users)), weibo_counts, color='#28A745', alpha=0.7)
+        ax1.set_title("用戶微博數量")
+        ax1.set_xticks(range(len(users)))
+        ax1.set_xticklabels(users, rotation=45, ha='right')
+        ax1.set_ylabel("微博數")
+
+        # 添加數值標籤
+        for bar, count in zip(bars, weibo_counts):
+            height = bar.get_height()
+            ax1.text(bar.get_x() + bar.get_width()/2., height,
+                    f'{count}', ha='center', va='bottom', fontsize=8)
+
+        # 成功率圓餅圖
+        success_data = sum(success_rates) / len(success_rates)
+        fail_data = 100 - success_data
+
+        ax2.pie([success_data, fail_data], labels=['成功', '失敗'],
+               autopct='%1.1f%%', colors=['#28A745', '#DC3545'], startangle=90)
+        ax2.set_title("平均成功率")
+
+        plt.tight_layout()
+        plt.figure(self.figure.number)  # 確保我們在正確的figure上工作
+        self.figure.clear()
+        self.figure = fig
+
+    def _create_performance_chart(self):
+        """創建效能指標圖表"""
+        data = self.stats_manager.get_performance_metrics()
+
+        if not data:
+            ax = self.figure.add_subplot(111)
+            ax.text(0.5, 0.5, "無數據可顯示", transform=ax.transAxes, ha="center", va="center",
+                   fontsize=14, color="gray")
+            ax.set_title("效能指標", fontsize=12, fontweight='bold')
+            return
+
+        ax1 = self.figure.add_subplot(111)
+
+        # 提取數據
+        timestamps = [row[0][:19] for row in data]  # 簡化時間顯示
+        memory_usage = [row[1] or 0 for row in data]
+        network_speed = [row[2] or 0 for row in data]
+        cpu_usage = [row[3] or 0 for row in data]
+
+        # 繪製多線圖
+        ax1.plot(timestamps, memory_usage, 'b-', linewidth=1.5, marker='o', markersize=3, label='記憶體使用量 (MB)')
+        ax1.plot(timestamps, network_speed, 'g-', linewidth=1.5, marker='s', markersize=3, label='網路速度 (KB/s)')
+        ax1.plot(timestamps, cpu_usage, 'r-', linewidth=1.5, marker='^', markersize=3, label='CPU使用率 (%)')
+
+        ax1.set_title("效能指標趨勢", fontsize=12, fontweight='bold')
+        ax1.set_xlabel("時間")
+        ax1.set_ylabel("數值")
+        ax1.legend(loc='upper right')
+
+        # 旋轉x軸標籤
+        plt.setp(ax1.get_xticklabels(), rotation=45, ha='right')
+
+        # 設置網格
+        ax1.grid(True, alpha=0.3)
+
+    def refresh_statistics(self):
+        """刷新統計數據顯示"""
+        try:
+            # 獲取總結統計
+            summary_stats = self.stats_manager.get_summary_stats()
+
+            if summary_stats:
+                self.summary_labels['total_sessions'].config(text=str(summary_stats['total_sessions']))
+                self.summary_labels['total_weibos'].config(text=str(summary_stats['total_weibos']))
+                self.summary_labels['total_images'].config(text=str(summary_stats['total_images']))
+                self.summary_labels['total_videos'].config(text=str(summary_stats['total_videos']))
+
+                avg_eff = summary_stats['avg_efficiency']
+                self.summary_labels['avg_efficiency'].config(
+                    text=".1f" if avg_eff else "0")
+
+                self.summary_labels['unique_users'].config(text=str(summary_stats['unique_users']))
+
+            # 刷新會話列表
+            self._refresh_sessions_tree()
+
+            # 刷新圖表
+            self.update_chart()
+
+        except Exception as e:
+            self.log_message(f"刷新統計失敗: {e}")
+
+    def _refresh_sessions_tree(self):
+        """刷新會話樹狀圖"""
+        # 清空樹狀圖
+        for item in self.sessions_tree.get_children():
+            self.sessions_tree.delete(item)
+
+        # 載入最近會話
+        sessions = self.stats_manager.get_recent_sessions(limit=20)
+
+        for session in sessions:
+            # 格式化顯示
+            start_time = session['start_time'][:19] if session['start_time'] else "未知"
+            user_id = session['user_id'][:10] if session['user_id'] else "未知"
+            status = session['status'] or "未知"
+            weibo_count = str(session['total_weibos'])
+            image_count = str(session['image_count'])
+            efficiency = ".1f" if session['efficiency'] else "0"
+
+            self.sessions_tree.insert("", tk.END, values=(
+                start_time, user_id, status, weibo_count, image_count, efficiency
+            ))
+
+    def cleanup_old_data(self):
+        """清理舊數據"""
+        if messagebox.askyesno("確認", "確定要清理一年以前的舊數據嗎？\n此操作無法撤銷。"):
+            try:
+                deleted_count = self.stats_manager.cleanup_old_data()
+                messagebox.showinfo("完成", f"已清理 {deleted_count} 條舊數據記錄")
+                self.refresh_statistics()
+            except Exception as e:
+                messagebox.showerror("錯誤", f"清理失敗: {e}")
+
+    def select_user_from_list(self):
+        """從用戶ID列表文件中選擇用戶"""
+        user_list_file = self.config_vars["user_id_list"].get()
+
+        if not user_list_file or not os.path.exists(user_list_file):
+            user_list_file = os.path.join(os.path.dirname(__file__), "user_id_list.txt")
+            if not os.path.exists(user_list_file):
+                messagebox.showwarning("Warning", "No user ID list file found. Please specify one in config settings.")
+                return None, None
+
+        # 讀取用戶列表
+        users = []
+        try:
+            with open(user_list_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        parts = line.split()
+                        if len(parts) >= 2 and parts[0].isdigit():
+                            user_id = parts[0]
+                            user_name = ' '.join(parts[1:])
+                            users.append((user_id, user_name))
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to read user list: {e}")
+            return None, None
+
+        if not users:
+            messagebox.showwarning("Warning", "User list is empty.")
+            return None, None
+
+        # 創建用戶選擇對話框
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Select User")
+        dialog.geometry("400x300")
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        # 用戶列表
+        listbox = tk.Listbox(dialog, height=10)
+        listbox.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        for user_id, user_name in users:
+            listbox.insert(tk.END, "2")
+
+        # 按鈕
+        btn_frame = ttk.Frame(dialog)
+        btn_frame.pack(fill=tk.X, padx=10, pady=5)
+
+        selected_user = [None, None]
+
+        def on_select():
+            selection = listbox.curselection()
+            if selection:
+                index = selection[0]
+                selected_user[0], selected_user[1] = users[index]
+            dialog.destroy()
+
+        def on_cancel():
+            dialog.destroy()
+
+        ttk.Button(btn_frame, text="Select", command=on_select).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(btn_frame, text="Cancel", command=on_cancel).pack(side=tk.RIGHT, padx=5)
+
+        # 等待對話框關閉
+        self.root.wait_window(dialog)
+
+        return selected_user[0], selected_user[1]
+
+    def select_schedule_type(self):
+        """選擇排程類型"""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Select Schedule Type")
+        dialog.geometry("300x200")
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        ttk.Label(dialog, text="Choose schedule type:", font=("Arial", 10, "bold")).pack(pady=10)
+
+        selected_type = [None]
+
+        def select_daily():
+            selected_type[0] = "daily"
+            dialog.destroy()
+
+        def select_weekly():
+            selected_type[0] = "weekly"
+            dialog.destroy()
+
+        def select_monthly():
+            selected_type[0] = "monthly"
+            dialog.destroy()
+
+        ttk.Button(dialog, text="Daily\n(Every day)", command=select_daily, width=15).pack(pady=5)
+        ttk.Button(dialog, text="Weekly\n(Every Monday)", command=select_weekly, width=15).pack(pady=5)
+        ttk.Button(dialog, text="Monthly\n(First day)", command=select_monthly, width=15).pack(pady=5)
+
+        self.root.wait_window(dialog)
+        return selected_type[0]
+
+    def select_schedule_time(self, schedule_type):
+        """選擇排程時間"""
+        if schedule_type == "daily":
+            prompt = "Enter daily execution time (HH:MM):"
+            initial = "09:00"
+        elif schedule_type == "weekly":
+            prompt = "Enter weekly execution time (HH:MM):"
+            initial = "09:00"
+        elif schedule_type == "monthly":
+            prompt = "Enter monthly execution time (HH:MM):"
+            initial = "09:00"
+
+        from tkinter import simpledialog
+        time_str = simpledialog.askstring("Schedule Time", prompt, initialvalue=initial)
+        return time_str
 
     def build_config_from_ui(self):
         """從UI建立配置字典"""
